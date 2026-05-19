@@ -37,6 +37,8 @@ services:
       - .env
     environment:
       DB_HOST: postgres
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8080:8000"
     depends_on:
