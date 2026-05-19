@@ -1,0 +1,25 @@
+# Environment & secrets
+.env
+credentials/
+
+# Database data
+postgres-data/
+
+# Backups (keep scripts, not dumps)
+backups/postgres/*.sql.gz
+backups/*.sql.gz
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
