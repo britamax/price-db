@@ -352,8 +352,12 @@ def search_prices(conn, query: str, limit: int = 10) -> List[Dict[str, Any]]:
 
 
 def search_hybrid(conn, query: str, query_embedding: List[float], limit: int = 10,
-                   w_cosine: float = 0.5, w_trigram: float = 0.3, w_tsvector: float = 0.2) -> List[Dict[str, Any]]:
-    """Hybrid search: cosine (embedding) + trigram + tsvector."""
+                   w_cosine: float = 0.4, w_trigram: float = 0.6, w_tsvector: float = 0.0) -> List[Dict[str, Any]]:
+    """Hybrid search: cosine (embedding) + trigram + tsvector.
+
+    Default weights tuned via grid search on eval/queries.txt (Recall@10=1.0, MRR=0.854).
+    Re-tune via `python -m eval.evaluate --sweep` when corpus shape changes significantly.
+    """
     vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
     with conn.cursor() as cur:
         cur.execute(
