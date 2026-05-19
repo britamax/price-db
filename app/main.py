@@ -158,6 +158,14 @@ def page(title: str, body: str, admin: bool = False) -> str:
 def startup():
     with get_conn() as conn:
         init_schema(conn)
+    # Register Phase 3 admin v2 routes
+    try:
+        from admin_v2 import register_routes
+        from embeddings import embed_single as _embed_single
+        register_routes(app, get_conn, require_admin_cookie, search_hybrid, _embed_single)
+    except Exception as e:
+        import traceback
+        print(f"[admin_v2] register failed: {e}\n{traceback.format_exc()}")
 
 
 @app.get("/health", response_class=PlainTextResponse)
