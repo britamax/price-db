@@ -333,6 +333,7 @@ def stats_summary(conn):
 
 
 def search_prices(conn, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Legacy trigram-only search (fallback when embeddings unavailable)."""
     q = normalize_search_text(query)
     if not q:
         return []
@@ -346,5 +347,17 @@ def search_prices(conn, query: str, limit: int = 10) -> List[Dict[str, Any]]:
             LIMIT %s
             """,
             (q, q, f"%{q}%", limit),
+        )
+        return list(cur.fetchall())
+
+
+def search_hybrid(conn, query: str, query_embedding: List[float], limit: int = 10,
+                   w_cosine: float = 0.5, w_trigram: float = 0.3, w_tsvector: float = 0.2) -> List[Dict[str, Any]]:
+    """Hybrid search: cosine (embedding) + trigram + tsvector."""
+    vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM search_hybrid(%s::vector, %s, %s, %s, %s, %s)",
+            (vec_str, query, limit, w_cosine, w_trigram, w_tsvector),
         )
         return list(cur.fetchall())

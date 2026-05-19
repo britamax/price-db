@@ -24,10 +24,12 @@ from db import (
     list_batches,
     list_category_rules,
     list_raw_rows,
+    search_hybrid,
     search_prices,
     stats_summary,
 )
 from price_utils import detect_columns, parse_supplier_text_prices
+from embeddings import embed_single
 
 APP_ADMIN_USER = os.getenv("APP_ADMIN_USER", "admin")
 APP_ADMIN_PASSWORD = os.getenv("APP_ADMIN_PASSWORD", "admin")
@@ -40,6 +42,29 @@ app = FastAPI(title="Database Harga Material")
 
 def get_conn():
     return connect_from_env(ENV)
+
+
+def smart_search(conn, query: str, limit: int = 10, mode: str = "hybrid"):
+    """Hybrid search with automatic fallback to lexical if embedding fails."""
+    if mode == "lexical":
+        results = search_prices(conn, query, limit)
+    else:
+        try:
+            emb = embed_single(query)
+            results = search_hybrid(conn, query, emb, limit)
+            # Add 'match_score' alias for backward compat with UI/export
+            for r in results:
+                r["match_score"] = r.get("score")
+        except Exception:
+            # Fallback to legacy trigram search
+            results = search_prices(conn, query, limit)
+    # Strip large fields from results
+    for r in results:
+        r.pop("embedding", None)
+        r.pop("embedding_model", None)
+        r.pop("embedding_version", None)
+        r.pop("embedded_at", None)
+    return results
 
 
 def make_session_token() -> str:
@@ -187,7 +212,7 @@ def search(queries: str = Form(...), limit: int = Form(10), pricedb_admin: Optio
     results = {}
     with get_conn() as conn:
         for q in lines:
-            results[q] = search_prices(conn, q, max(1, min(limit, 50)))
+            results[q] = smart_search(conn, q, max(1, min(limit, 50)))
     body = f"""
     <div class="card"><h1>Hasil Search</h1>
     <form action="/export-search.csv" method="post" style="display:inline-block"><input type="hidden" name="queries" value="{html_escape(queries)}"><input type="hidden" name="limit" value="{limit}"><button>Export CSV</button></form>
@@ -198,10 +223,10 @@ def search(queries: str = Form(...), limit: int = Form(10), pricedb_admin: Optio
 
 
 @app.get("/api/search")
-def api_search(q: str, limit: int = 5):
+def api_search(q: str, limit: int = 5, mode: str = "hybrid"):
     safe_limit = max(1, min(limit, 10))
     with get_conn() as conn:
-        rows = search_prices(conn, q, safe_limit)
+        rows = smart_search(conn, q, safe_limit, mode=mode)
     return {"query": q, "limit": safe_limit, "results": jsonable_encoder(rows)}
 
 
@@ -215,7 +240,7 @@ def api_batch_search(payload: dict):
     results = {}
     with get_conn() as conn:
         for q in queries:
-            results[q] = jsonable_encoder(search_prices(conn, q, safe_limit))
+            results[q] = jsonable_encoder(smart_search(conn, q, safe_limit))
     return {"limit": safe_limit, "results": results}
 
 
@@ -224,7 +249,7 @@ def _collect_search_rows(queries: str, limit: int):
     rows = []
     with get_conn() as conn:
         for q in [l.strip() for l in queries.splitlines() if l.strip()]:
-            for r in search_prices(conn, q, max(1, min(limit, 50))):
+            for r in smart_search(conn, q, max(1, min(limit, 50))):
                 rows.append([
                     q, r.get("match_score"), r.get("effective_date"), r.get("nama"), r.get("merek"),
                     r.get("spesifikasi"), r.get("satuan"), r.get("harga"), r.get("supplier"),
