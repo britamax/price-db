@@ -64,6 +64,11 @@ def _page(title: str, body: str, extra_head: str = "") -> str:
       table {{ width:100%; border-collapse:collapse; font-size:13px; }}
       th,td {{ border-bottom:1px solid #334155; padding:8px; vertical-align:top; }}
       th {{ text-align:left; color:#93c5fd; position:sticky; top:0; background:#111827; }}
+      th[data-sort] {{ cursor:pointer; user-select:none; }}
+      th[data-sort]:hover {{ background:#1e293b; color:#7dd3fc; }}
+      th[data-sort]::after {{ content:" ⇅"; opacity:0.4; font-size:11px; }}
+      th[data-sort].asc::after {{ content:" ▲"; opacity:1; color:#38bdf8; }}
+      th[data-sort].desc::after {{ content:" ▼"; opacity:1; color:#38bdf8; }}
       tr:hover {{ background:#0b1220; }}
       .muted {{ color:#94a3b8; font-size:12px; }} .ok {{ color:#86efac; }} .warn {{ color:#fde68a; }} .err {{ color:#fca5a5; }}
       .nav {{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }}
@@ -83,7 +88,67 @@ def _page(title: str, body: str, extra_head: str = "") -> str:
       .htmx-request .htmx-indicator {{ opacity:1; }}
       .htmx-request.htmx-indicator {{ opacity:1; }}
       details summary {{ cursor:pointer; color:#fbbf24; }}
-    </style></head><body><div class="wrap">
+    </style>
+    <script>
+      // Universal client-side table sort: click <th data-sort="type"> to sort
+      // type: "string" (default), "number", "date"
+      (function() {{
+        function parseValue(cell, type) {{
+          // Prefer data-value attribute if present (lets server provide raw sort key)
+          const raw = cell.getAttribute('data-value');
+          const text = (raw !== null ? raw : cell.textContent).trim();
+          if (type === 'number') {{
+            // Strip Rp, dots, commas, %, spaces
+            const cleaned = text.replace(/[^\\d.\\-]/g, '').replace(/\\.(?=\\d{{3}})/g, '');
+            const n = parseFloat(cleaned);
+            return isNaN(n) ? -Infinity : n;
+          }}
+          if (type === 'date') {{
+            const d = new Date(text);
+            return isNaN(d) ? 0 : d.getTime();
+          }}
+          return text.toLowerCase();
+        }}
+
+        function sortTable(table, th) {{
+          const idx = Array.from(th.parentElement.children).indexOf(th);
+          const type = th.getAttribute('data-sort') || 'string';
+          const tbody = table.tBodies[0];
+          if (!tbody) return;
+          const rows = Array.from(tbody.rows);
+          const wasAsc = th.classList.contains('asc');
+          const newDir = wasAsc ? 'desc' : 'asc';
+
+          // Clear all indicators on this table
+          table.querySelectorAll('th[data-sort]').forEach(h => h.classList.remove('asc', 'desc'));
+          th.classList.add(newDir);
+
+          rows.sort((a, b) => {{
+            const va = parseValue(a.cells[idx], type);
+            const vb = parseValue(b.cells[idx], type);
+            if (va < vb) return newDir === 'asc' ? -1 : 1;
+            if (va > vb) return newDir === 'asc' ? 1 : -1;
+            return 0;
+          }});
+          rows.forEach(r => tbody.appendChild(r));
+        }}
+
+        function attachSort(root) {{
+          (root || document).querySelectorAll('table').forEach(table => {{
+            table.querySelectorAll('th[data-sort]').forEach(th => {{
+              if (th._sortAttached) return;
+              th._sortAttached = true;
+              th.addEventListener('click', () => sortTable(table, th));
+            }});
+          }});
+        }}
+
+        document.addEventListener('DOMContentLoaded', () => attachSort());
+        // Re-attach after HTMX swaps
+        document.body.addEventListener('htmx:afterSwap', e => attachSort(e.target));
+      }})();
+    </script>
+    </head><body><div class="wrap">
     <div class="nav"><a href="/">Search</a>{_nav_v2()}<a href="/health">Health</a></div>
     {body}
     </div></body></html>
@@ -177,17 +242,18 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
             canon_unit = r.get("canonical_unit") or r.get("satuan") or ""
             ppc = r.get("price_per_canonical_unit")
             ppc_str = _fmt_rp(ppc) + f"/{canon_unit}" if ppc and canon_unit else "-"
+            harga_val = r.get('harga') or 0
             rows_html += f"""
             <tr>
-              <td>{i}</td>
+              <td data-value="{i}">{i}</td>
               <td><b>{html.escape(r['nama'] or '')}</b><br><span class="muted">{html.escape(r.get('merek') or '')} · {html.escape(r.get('category') or '')}</span></td>
               <td>{html.escape(r.get('satuan') or '')}</td>
-              <td>{_fmt_rp(r.get('harga'))}<br><span class="muted">{ppc_str}</span></td>
+              <td data-value="{harga_val}">{_fmt_rp(harga_val)}<br><span class="muted">{ppc_str}</span></td>
               <td>{html.escape(r.get('supplier') or '')}<br><span class="muted">{html.escape(str(r.get('effective_date') or ''))}</span></td>
-              <td><b style="color:#38bdf8">{score:.3f}</b></td>
-              <td>{_bar(cos, 'cos')}<br><span class="muted">cos</span></td>
-              <td>{_bar(tri, 'tri')}<br><span class="muted">tri</span></td>
-              <td>{_bar(ts, 'ts')}<br><span class="muted">ts</span></td>
+              <td data-value="{score}"><b style="color:#38bdf8">{score:.3f}</b></td>
+              <td data-value="{cos}">{_bar(cos, 'cos')}<br><span class="muted">cos</span></td>
+              <td data-value="{tri}">{_bar(tri, 'tri')}<br><span class="muted">tri</span></td>
+              <td data-value="{ts}">{_bar(ts, 'ts')}<br><span class="muted">ts</span></td>
             </tr>
             """
 
@@ -209,7 +275,7 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
           <h2>Hasil ({len(results)})</h2>
           {expansion_html}
           <table>
-            <thead><tr><th>#</th><th>Material</th><th>Satuan</th><th>Harga</th><th>Supplier · Tgl</th><th>Score</th><th>Cosine</th><th>Trigram</th><th>TS</th></tr></thead>
+            <thead><tr><th data-sort="number">#</th><th data-sort="string">Material</th><th data-sort="string">Satuan</th><th data-sort="number">Harga</th><th data-sort="string">Supplier · Tgl</th><th data-sort="number">Score</th><th data-sort="number">Cosine</th><th data-sort="number">Trigram</th><th data-sort="number">TS</th></tr></thead>
             <tbody>{rows_html}</tbody>
           </table>
         </div>
@@ -300,7 +366,7 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
             </div>
           </form>
           <table>
-            <thead><tr><th>Variant</th><th></th><th>Canonical</th><th>Kind</th><th>Conf</th><th>By</th><th></th></tr></thead>
+            <thead><tr><th data-sort="string">Variant</th><th></th><th data-sort="string">Canonical</th><th data-sort="string">Kind</th><th data-sort="number">Conf</th><th data-sort="string">By</th><th></th></tr></thead>
             <tbody>{rows}</tbody>
           </table>
           <p class="muted">Showing {len(aliases)} of {sum(c['n'] for c in counts)} aliases (max 200).</p>
@@ -401,12 +467,12 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
             rows += f"""
             <tr>
               <td><a href="/admin/materials/{html.escape(m['nama'])}"><b>{html.escape(m['nama'])}</b></a></td>
-              <td>{m['n_entries']}</td>
-              <td>{_fmt_rp(m['min_h'])}</td>
-              <td><b>{_fmt_rp(m['median_h'])}</b></td>
-              <td>{_fmt_rp(m['max_h'])}</td>
-              <td>{ppc_str}</td>
-              <td class="muted">{m['last_date']}</td>
+              <td data-value="{m['n_entries']}">{m['n_entries']}</td>
+              <td data-value="{m['min_h'] or 0}">{_fmt_rp(m['min_h'])}</td>
+              <td data-value="{m['median_h'] or 0}"><b>{_fmt_rp(m['median_h'])}</b></td>
+              <td data-value="{m['max_h'] or 0}">{_fmt_rp(m['max_h'])}</td>
+              <td data-value="{m['median_ppc'] or 0}">{ppc_str}</td>
+              <td class="muted">{m['last_date'] or ''}</td>
             </tr>
             """
 
@@ -420,7 +486,7 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
         <div class="card">
           <table>
             <thead><tr>
-              <th>Material</th><th>Entries</th><th>Min</th><th>Median</th><th>Max</th><th>Median /unit canonical</th><th>Last seen</th>
+              <th data-sort="string">Material</th><th data-sort="number">Entries</th><th data-sort="number">Min</th><th data-sort="number">Median</th><th data-sort="number">Max</th><th data-sort="number">Median /unit canonical</th><th data-sort="date">Last seen</th>
             </tr></thead>
             <tbody>{rows}</tbody>
           </table>
@@ -455,13 +521,15 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
         rows_html = ""
         for r in rows_data:
             ppc = _fmt_rp(r['price_per_canonical_unit']) + f"/{r['canonical_unit']}" if r['price_per_canonical_unit'] else "-"
+            harga_v = float(r['harga'] or 0)
+            ppc_v = float(r['price_per_canonical_unit'] or 0)
             rows_html += f"""
             <tr>
               <td>{r['effective_date'] or '-'}</td>
               <td>{html.escape(r['supplier'] or '')}</td>
               <td>{html.escape(r['merek'] or '')}</td>
-              <td>{_fmt_rp(r['harga'])} <span class="muted">/{html.escape(r['satuan'] or '')}</span></td>
-              <td>{ppc}</td>
+              <td data-value="{harga_v}">{_fmt_rp(r['harga'])} <span class="muted">/{html.escape(r['satuan'] or '')}</span></td>
+              <td data-value="{ppc_v}">{ppc}</td>
               <td class="muted">{html.escape(r['lokasi'] or '')}</td>
             </tr>
             """
@@ -477,7 +545,7 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
         </div>
         <div class="card">
           <table>
-            <thead><tr><th>Date</th><th>Supplier</th><th>Merk</th><th>Harga</th><th>Per canonical</th><th>Lokasi</th></tr></thead>
+            <thead><tr><th data-sort="date">Date</th><th data-sort="string">Supplier</th><th data-sort="string">Merk</th><th data-sort="number">Harga</th><th data-sort="number">Per canonical</th><th data-sort="string">Lokasi</th></tr></thead>
             <tbody>{rows_html}</tbody>
           </table>
         </div>
@@ -544,7 +612,7 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
           <h1>📜 Audit Log</h1>
           <p class="muted">Last {len(events)} actions on alias / material / category-rule write endpoints.</p>
           <table>
-            <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Entity</th><th>Before</th><th>After</th></tr></thead>
+            <thead><tr><th data-sort="date">When</th><th data-sort="string">Actor</th><th data-sort="string">Action</th><th data-sort="string">Entity</th><th>Before</th><th>After</th></tr></thead>
             <tbody>{rows or '<tr><td colspan="6" class="muted">No events yet.</td></tr>'}</tbody>
           </table>
         </div>
@@ -583,9 +651,9 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
 
             rows += f"""
             <tr>
-              <td>#{j['id']}</td>
+              <td data-value="{j['id']}">#{j['id']}</td>
               <td>{html.escape(j['original_name'])}</td>
-              <td>{j['processed'] or 0} / {j['total_rows'] or 0} <span class="muted">({pct}%)</span></td>
+              <td data-value="{pct}">{j['processed'] or 0} / {j['total_rows'] or 0} <span class="muted">({pct}%)</span></td>
               <td><span class="pill {status_class}">{j['status']}</span></td>
               <td class="muted">{j['created_at']}</td>
               <td>{action}</td>
@@ -606,7 +674,7 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
         <div class="card">
           <h2>Job History</h2>
           <table>
-            <thead><tr><th>ID</th><th>File</th><th>Progress</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
+            <thead><tr><th data-sort="number">ID</th><th data-sort="string">File</th><th data-sort="number">Progress</th><th data-sort="string">Status</th><th data-sort="date">Created</th><th>Action</th></tr></thead>
             <tbody>{rows or '<tr><td colspan="6" class="muted">Belum ada job.</td></tr>'}</tbody>
           </table>
         </div>
