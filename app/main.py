@@ -150,7 +150,50 @@ def page(title: str, body: str, admin: bool = False) -> str:
     </style></head><body><div class="wrap">
     <div class="nav"><a href="/">Search</a>{nav_admin}<a href="/health">Health</a></div>
     {body}
-    </div></body></html>
+    </div>
+    <script>
+    function initSortable() {{
+      document.querySelectorAll('table[class*="sortable"], .sortable-table').forEach(function(tbl) {{
+        tbl.querySelectorAll('thead th[data-sort]').forEach(function(th, colIdx) {{
+          if (th.dataset.sortBound) return;
+          th.dataset.sortBound = '1';
+          th.style.cursor = 'pointer';
+          th.title = 'Klik untuk sort';
+          if (!th.querySelector('.sort-icon')) {{
+            var icon = document.createElement('span');
+            icon.className = 'sort-icon';
+            icon.textContent = ' ⇅';
+            icon.style.fontSize = '10px';
+            icon.style.opacity = '0.5';
+            th.appendChild(icon);
+          }}
+          th.addEventListener('click', function() {{
+            var asc = th.dataset.sortDir !== 'asc';
+            th.dataset.sortDir = asc ? 'asc' : 'desc';
+            tbl.querySelectorAll('thead th .sort-icon').forEach(function(ic) {{
+              ic.textContent = ' ⇅'; ic.style.opacity = '0.5';
+            }});
+            th.querySelector('.sort-icon').textContent = asc ? ' ▲' : ' ▼';
+            th.querySelector('.sort-icon').style.opacity = '1';
+            var tbody = tbl.querySelector('tbody');
+            var rows = Array.from(tbody.querySelectorAll('tr'));
+            rows.sort(function(a, b) {{
+              var ca = a.cells[colIdx], cb = b.cells[colIdx];
+              var va = (ca.dataset.value !== undefined ? ca.dataset.value : ca.textContent).trim();
+              var vb = (cb.dataset.value !== undefined ? cb.dataset.value : cb.textContent).trim();
+              var na = parseFloat(va), nb = parseFloat(vb);
+              var cmp = (!isNaN(na) && !isNaN(nb)) ? na - nb : va.localeCompare(vb, 'id');
+              return asc ? cmp : -cmp;
+            }});
+            rows.forEach(function(r) {{ tbody.appendChild(r); }});
+          }});
+        }});
+      }});
+    }}
+    document.addEventListener('DOMContentLoaded', initSortable);
+    document.addEventListener('htmx:afterSwap', initSortable);
+    </script>
+    </body></html>
     """
 
 
@@ -184,12 +227,25 @@ def render_results(results_by_query: Dict[str, List[dict]]) -> str:
         if not rows:
             chunks.append("<p class='warn'>Tidak ada hasil.</p>")
             continue
-        chunks.append("<div style='overflow:auto'><table><thead><tr><th>Score</th><th>Tanggal</th><th>Nama</th><th>Merek</th><th>Spec</th><th>Satuan</th><th>Harga</th><th>Supplier</th><th>Kategori</th><th>Keterangan</th></tr></thead><tbody>")
+        chunks.append("<div style='overflow:auto'><table class='sortable-table'><thead><tr><th data-sort='score'>Score</th><th data-sort='tanggal'>Tanggal</th><th data-sort='nama'>Nama</th><th data-sort='merek'>Merek</th><th data-sort='spec'>Spec</th><th data-sort='satuan'>Satuan</th><th data-sort='harga'>Harga</th><th data-sort='supplier'>Supplier</th><th data-sort='kategori'>Kategori</th><th data-sort='keterangan'>Keterangan</th></tr></thead><tbody>")
         for r in rows:
             score = r.get("match_score")
             score_txt = f"{float(score):.2f}" if score is not None else ""
+            score_val = f"{float(score):.4f}" if score is not None else "0"
+            harga_val = str(r.get('harga') or 0)
             chunks.append(
-                f"<tr><td>{score_txt}</td><td>{html_escape(r.get('effective_date'))}</td><td>{html_escape(r.get('nama'))}</td><td>{html_escape(r.get('merek'))}</td><td>{html_escape(r.get('spesifikasi'))}</td><td>{html_escape(r.get('satuan'))}</td><td>{fmt_rupiah(r.get('harga'))}</td><td>{html_escape(r.get('supplier'))}</td><td>{html_escape(r.get('category'))}/{html_escape(r.get('subcategory'))}</td><td>{html_escape(r.get('keterangan'))}</td></tr>"
+                f"<tr>"
+                f"<td data-value='{score_val}'>{score_txt}</td>"
+                f"<td>{html_escape(r.get('effective_date'))}</td>"
+                f"<td>{html_escape(r.get('nama'))}</td>"
+                f"<td>{html_escape(r.get('merek'))}</td>"
+                f"<td>{html_escape(r.get('spesifikasi'))}</td>"
+                f"<td>{html_escape(r.get('satuan'))}</td>"
+                f"<td data-value='{harga_val}'>{fmt_rupiah(r.get('harga'))}</td>"
+                f"<td>{html_escape(r.get('supplier'))}</td>"
+                f"<td>{html_escape(r.get('category'))}/{html_escape(r.get('subcategory'))}</td>"
+                f"<td>{html_escape(r.get('keterangan'))}</td>"
+                f"</tr>"
             )
         chunks.append("</tbody></table></div>")
     return "".join(chunks)
