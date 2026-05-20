@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import secrets
+from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 router = APIRouter(prefix="/admin")
 
@@ -30,6 +33,7 @@ def _nav_v2() -> str:
         '<a href="/admin/search">Search Playground</a>'
         '<a href="/admin/aliases">Aliases</a>'
         '<a href="/admin/materials">Materials</a>'
+        '<a href="/admin/batch-match">Tender Match</a>'
         '<a href="/admin/audit">Audit Log</a>'
         '<a href="/admin/raw">Raw Rows</a>'
         '<a href="/admin/rules">Kategori</a>'
@@ -546,3 +550,264 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
         </div>
         """
         return HTMLResponse(_page("Audit Log", body))
+
+    # ──────────────────────────────────────────────────────────────────
+    # Task 4.2 / 4.4 / 4.5 — Batch Tender Matching
+    # ──────────────────────────────────────────────────────────────────
+    UPLOAD_DIR = Path("/app/batch-uploads")
+    UPLOAD_DIR.mkdir(exist_ok=True)
+
+    @app.get("/admin/batch-match", response_class=HTMLResponse)
+    def admin_batch_match(_: bool = Depends(require_admin_cookie)):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, original_name, total_rows, processed, status,
+                           created_at, finished_at, error, result_path
+                    FROM batch_job ORDER BY created_at DESC LIMIT 50
+                """)
+                jobs = cur.fetchall()
+
+        rows = ""
+        for j in jobs:
+            pct = int((j['processed'] or 0) / max(1, j['total_rows'] or 1) * 100) if j['total_rows'] else 0
+            status_class = {"done": "ok", "failed": "err", "running": "warn"}.get(j['status'], "muted")
+            action = ""
+            if j['status'] == 'done' and j['result_path']:
+                action = f'<a href="/admin/batch-match/{j["id"]}/download">⬇ Download</a>'
+            elif j['status'] in ('pending', 'running'):
+                action = f'<span class="muted">running...</span>'
+            elif j['status'] == 'failed':
+                err_short = html.escape((j['error'] or '')[:60])
+                action = f'<span class="err" title="{html.escape(j["error"] or "")}">{err_short}</span>'
+
+            rows += f"""
+            <tr>
+              <td>#{j['id']}</td>
+              <td>{html.escape(j['original_name'])}</td>
+              <td>{j['processed'] or 0} / {j['total_rows'] or 0} <span class="muted">({pct}%)</span></td>
+              <td><span class="pill {status_class}">{j['status']}</span></td>
+              <td class="muted">{j['created_at']}</td>
+              <td>{action}</td>
+            </tr>
+            """
+
+        body = f"""
+        <div class="card">
+          <h1>📊 Tender Material Matching</h1>
+          <p class="muted">Upload file Excel tender (.xlsx). Sistem akan mencari harga match untuk setiap baris berdasarkan kolom nama material.</p>
+          <form method="post" action="/admin/batch-match/upload" enctype="multipart/form-data">
+            <label>Pilih file Excel tender:</label>
+            <input type="file" name="file" accept=".xlsx" required>
+            <button type="submit">📤 Upload & Preview</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Job History</h2>
+          <table>
+            <thead><tr><th>ID</th><th>File</th><th>Progress</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
+            <tbody>{rows or '<tr><td colspan="6" class="muted">Belum ada job.</td></tr>'}</tbody>
+          </table>
+        </div>
+        """
+        return HTMLResponse(_page("Tender Match", body))
+
+    @app.post("/admin/batch-match/upload", response_class=HTMLResponse)
+    async def admin_batch_upload(file: UploadFile = File(...), _: bool = Depends(require_admin_cookie)):
+        if not file.filename.lower().endswith(".xlsx"):
+            return HTMLResponse(_page("Upload Error", '<div class="card err">File harus .xlsx</div>'))
+
+        # Save with random suffix to avoid collisions
+        suffix = secrets.token_hex(4)
+        safe_name = f"upload_{suffix}_{Path(file.filename).name}"
+        save_path = UPLOAD_DIR / safe_name
+
+        content = await file.read()
+        if len(content) > 10 * 1024 * 1024:
+            return HTMLResponse(_page("Upload Error", '<div class="card err">File terlalu besar (max 10 MB)</div>'))
+        save_path.write_bytes(content)
+
+        # Parse preview
+        try:
+            from services.excel_io import parse_preview
+            preview = parse_preview(save_path)
+        except Exception as e:
+            save_path.unlink(missing_ok=True)
+            return HTMLResponse(_page("Parse Error", f'<div class="card err">Gagal parse: {html.escape(str(e))}</div>'))
+
+        headers = preview["headers"]
+        detected = preview["detected"]
+        total = preview["total_rows"]
+
+        # Build header option selects
+        def _opts(selected: Optional[str]) -> str:
+            opts = '<option value="">— pilih —</option>'
+            for h in headers:
+                sel = "selected" if h == selected else ""
+                opts += f'<option value="{html.escape(h)}" {sel}>{html.escape(h)}</option>'
+            return opts
+
+        preview_html = ""
+        if preview["preview_rows"]:
+            head_html = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+            body_html = ""
+            for row in preview["preview_rows"]:
+                body_html += "<tr>" + "".join(f"<td>{html.escape(c)[:60]}</td>" for c in row) + "</tr>"
+            preview_html = f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
+
+        body = f"""
+        <div class="card">
+          <h1>📋 Preview & Mapping</h1>
+          <p class="muted"><b>File:</b> {html.escape(file.filename)} · <b>Rows:</b> {total} · <b>Cols:</b> {len(headers)}</p>
+          <form method="post" action="/admin/batch-match/start">
+            <input type="hidden" name="filename" value="{html.escape(safe_name)}">
+            <input type="hidden" name="original_name" value="{html.escape(file.filename)}">
+            <div class="grid grid-3">
+              <div>
+                <label>Kolom Nama Material *</label>
+                <select name="name_column" required>{_opts(detected.get('name_column'))}</select>
+              </div>
+              <div>
+                <label>Kolom Satuan</label>
+                <select name="unit_column">{_opts(detected.get('unit_column'))}</select>
+              </div>
+              <div>
+                <label>Kolom Volume / Qty</label>
+                <select name="qty_column">{_opts(detected.get('qty_column'))}</select>
+              </div>
+            </div>
+            <p class="muted">📝 Auto-detected:
+              nama=<code>{html.escape(detected.get('name_column') or 'none')}</code>,
+              satuan=<code>{html.escape(detected.get('unit_column') or 'none')}</code>,
+              qty=<code>{html.escape(detected.get('qty_column') or 'none')}</code>
+            </p>
+            <button type="submit">▶ Mulai Matching</button>
+            <a href="/admin/batch-match" style="margin-left:8px">Batal</a>
+          </form>
+        </div>
+        <div class="card">
+          <h3>Preview 10 baris pertama</h3>
+          <div style="overflow:auto">{preview_html}</div>
+        </div>
+        """
+        return HTMLResponse(_page("Preview Tender", body))
+
+    @app.post("/admin/batch-match/start")
+    async def admin_batch_start(
+        filename: str = Form(...),
+        original_name: str = Form(...),
+        name_column: str = Form(...),
+        unit_column: str = Form(""),
+        qty_column: str = Form(""),
+        _: bool = Depends(require_admin_cookie),
+    ):
+        # Create batch_job row
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO batch_job (filename, original_name, name_column, unit_column, qty_column, status)
+                    VALUES (%s, %s, %s, %s, %s, 'pending') RETURNING id
+                """, (filename, original_name, name_column,
+                      unit_column or None, qty_column or None))
+                job_id = cur.fetchone()["id"]
+                cur.execute(
+                    "INSERT INTO audit_log (actor, action, entity_type, entity_id, after) VALUES (%s, %s, %s, %s, %s::jsonb)",
+                    ("admin-ui", "batch_start", "batch_job", job_id,
+                     json.dumps({"file": original_name, "name_col": name_column})),
+                )
+
+        # Enqueue to ARQ
+        try:
+            from arq import create_pool
+            from workers.config import get_redis_settings
+            pool = await create_pool(get_redis_settings())
+            await pool.enqueue_job("run_batch_match", job_id)
+            await pool.close()
+        except Exception as e:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE batch_job SET status='failed', error=%s WHERE id=%s",
+                        (f"enqueue failed: {e}", job_id),
+                    )
+            return HTMLResponse(_page("Enqueue Error",
+                f'<div class="card err">Gagal enqueue ke worker: {html.escape(str(e))}</div>'))
+
+        return RedirectResponse(url=f"/admin/batch-match/{job_id}", status_code=303)
+
+    @app.get("/admin/batch-match/{job_id}", response_class=HTMLResponse)
+    def admin_batch_detail(job_id: int, _: bool = Depends(require_admin_cookie)):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM batch_job WHERE id = %s", (job_id,))
+                job = cur.fetchone()
+        if not job:
+            return HTMLResponse(_page("Not Found", '<div class="card err">Job tidak ditemukan.</div>'))
+
+        body = f"""
+        <div class="card">
+          <h1>📊 Job #{job['id']}: {html.escape(job['original_name'])}</h1>
+          <p class="muted">Created: {job['created_at']} · Status: <span class="pill">{job['status']}</span></p>
+          <div id="progress"
+               hx-get="/admin/batch-match/{job_id}/progress"
+               hx-trigger="load, every 2s"
+               hx-swap="innerHTML">
+            <p>Loading...</p>
+          </div>
+        </div>
+        """
+        return HTMLResponse(_page(f"Job #{job_id}", body))
+
+    @app.get("/admin/batch-match/{job_id}/progress", response_class=HTMLResponse)
+    def admin_batch_progress(job_id: int, _: bool = Depends(require_admin_cookie)):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM batch_job WHERE id = %s", (job_id,))
+                job = cur.fetchone()
+        if not job:
+            return HTMLResponse('<p class="err">Not found</p>')
+
+        total = job['total_rows'] or 0
+        processed = job['processed'] or 0
+        pct = int(processed / max(1, total) * 100) if total else 0
+        status = job['status']
+
+        bar_html = f"""
+        <div style="background:#1e293b; border-radius:8px; overflow:hidden; height:24px; margin:8px 0">
+          <div style="background:#0ea5e9; height:100%; width:{pct}%; transition: width 0.5s"></div>
+        </div>
+        <p><b>{processed} / {total}</b> rows ({pct}%) — status: <span class="pill">{status}</span></p>
+        """
+
+        if status == "done":
+            stop_trigger = '<script>document.getElementById("progress").setAttribute("hx-trigger","none");htmx.process(document.body);</script>'
+            return HTMLResponse(f"""
+            {bar_html}
+            <p class="ok">✓ Selesai! <a href="/admin/batch-match/{job_id}/download"><button>⬇ Download Hasil</button></a></p>
+            {stop_trigger}
+            """)
+        if status == "failed":
+            err = html.escape(job.get('error') or '')
+            return HTMLResponse(f"{bar_html}<p class='err'>Failed: {err}</p>")
+        return HTMLResponse(bar_html)
+
+    @app.get("/admin/batch-match/{job_id}/download")
+    def admin_batch_download(job_id: int, _: bool = Depends(require_admin_cookie)):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT result_path, original_name FROM batch_job WHERE id = %s AND status='done'", (job_id,))
+                row = cur.fetchone()
+        if not row or not row['result_path']:
+            raise HTTPException(status_code=404, detail="Result file not available")
+
+        path = Path("/app/batch-uploads") / row['result_path']
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="File missing on disk")
+
+        download_name = f"matched_{row['original_name']}"
+        return FileResponse(
+            path,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=download_name,
+        )
