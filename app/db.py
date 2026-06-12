@@ -234,12 +234,15 @@ def import_rows(conn, batch_id: int, rows: List[Dict[str, Any]], source_sheet: s
                     )
                     raw_id = cur.fetchone()["id"]
                     search_text = canonical_search_text(row)
+                    # Apply alias expansion (cache loaded lazily on first call)
+                    from aliases import expand_aliases
+                    search_text_expanded = expand_aliases(search_text, conn=conn)
                     cur.execute(
                         """
                         INSERT INTO price_records (raw_price_row_id,nama,merek,spesifikasi,satuan,category,subcategory,category_source,category_confidence,harga,harga_raw,supplier,supplier_normalized,effective_date,lokasi,sumber,keterangan,search_text)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         """,
-                        (raw_id,row["nama"],row["merek"],row["spesifikasi"],row["satuan"],row["category"],row["subcategory"],row["category_source"],row["category_confidence"],row["harga"],row["harga_raw"],row["supplier"],normalize_search_text(row["supplier"]),row["tanggal"],row["lokasi"],row["sumber"],row["keterangan"],search_text)
+                        (raw_id,row["nama"],row["merek"],row["spesifikasi"],row["satuan"],row["category"],row["subcategory"],row["category_source"],row["category_confidence"],row["harga"],row["harga_raw"],row["supplier"],normalize_search_text(row["supplier"]),row["tanggal"],row["lokasi"],row["sumber"],row["keterangan"],search_text_expanded)
                     )
                     cur.execute("INSERT INTO upload_row_events (batch_id,row_number,raw_row_id,row_hash,status,message) VALUES (%s,%s,%s,%s,'inserted','ok')", (batch_id, idx, raw_id, h))
                     inserted += 1
@@ -333,6 +336,7 @@ def stats_summary(conn):
 
 
 def search_prices(conn, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Legacy trigram-only search (fallback when embeddings unavailable)."""
     q = normalize_search_text(query)
     if not q:
         return []
@@ -348,3 +352,26 @@ def search_prices(conn, query: str, limit: int = 10) -> List[Dict[str, Any]]:
             (q, q, f"%{q}%", limit),
         )
         return list(cur.fetchall())
+
+
+def search_hybrid(conn, query: str, query_embedding: List[float], limit: int = 10,
+                   w_cosine: float = 0.4, w_trigram: float = 0.6, w_tsvector: float = 0.0,
+                   lokasi: str = None, sumber: str = None, category: str = None) -> List[Dict[str, Any]]:
+    """Hybrid search: cosine (embedding) + trigram + tsvector.
+
+    Default weights tuned via grid search on eval/queries.txt (Recall@10=1.0, MRR=0.854).
+    Re-tune via  when corpus shape changes significantly.
+    Query is expanded via alias map before lexical matching (variants->canonical).
+    Supports optional filters: lokasi, sumber, category.
+    """
+    from aliases import expand_aliases
+    query_expanded = expand_aliases(query, conn=conn)
+    vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM search_hybrid(%s::vector, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (vec_str, query_expanded, limit, w_cosine, w_trigram, w_tsvector,
+             lokasi or None, sumber or None, category or None),
+        )
+        return list(cur.fetchall())
+

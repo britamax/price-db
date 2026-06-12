@@ -4,6 +4,8 @@ credentials/
 
 # Database data
 postgres-data/
+redis-data/
+batch-uploads/
 
 # Backups (keep scripts, not dumps)
 backups/postgres/*.sql.gz

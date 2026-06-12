@@ -1,16 +1,32 @@
 services:
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     container_name: price-db-postgres
     restart: unless-stopped
     env_file:
       - .env
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
+      retries: 5
+    networks:
+      - price-db-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: price-db-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - ./redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
       retries: 5
     networks:
       - price-db-net
@@ -36,10 +52,40 @@ services:
       - .env
     environment:
       DB_HOST: postgres
+      REDIS_HOST: redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8080:8000"
+    volumes:
+      - ./batch-uploads:/app/batch-uploads
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - price-db-net
+
+  worker:
+    build:
+      context: ./app
+    container_name: price-db-worker
+    restart: unless-stopped
+    command: ["arq", "workers.config.WorkerSettings"]
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./batch-uploads:/app/batch-uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - price-db-net

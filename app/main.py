@@ -24,10 +24,12 @@ from db import (
     list_batches,
     list_category_rules,
     list_raw_rows,
+    search_hybrid,
     search_prices,
     stats_summary,
 )
 from price_utils import detect_columns, parse_supplier_text_prices
+from embeddings import embed_single
 
 APP_ADMIN_USER = os.getenv("APP_ADMIN_USER", "admin")
 APP_ADMIN_PASSWORD = os.getenv("APP_ADMIN_PASSWORD", "admin")
@@ -40,6 +42,31 @@ app = FastAPI(title="Database Harga Material")
 
 def get_conn():
     return connect_from_env(ENV)
+
+
+def smart_search(conn, query: str, limit: int = 10, mode: str = "hybrid",
+                 lokasi: str = None, sumber: str = None, category: str = None):
+    """Hybrid search with automatic fallback to lexical if embedding fails."""
+    if mode == "lexical":
+        results = search_prices(conn, query, limit)
+    else:
+        try:
+            emb = embed_single(query)
+            results = search_hybrid(conn, query, emb, limit,
+                                    lokasi=lokasi, sumber=sumber, category=category)
+            # Add 'match_score' alias for backward compat with UI/export
+            for r in results:
+                r["match_score"] = r.get("score")
+        except Exception:
+            # Fallback to legacy trigram search
+            results = search_prices(conn, query, limit)
+    # Strip large fields from results
+    for r in results:
+        r.pop("embedding", None)
+        r.pop("embedding_model", None)
+        r.pop("embedding_version", None)
+        r.pop("embedded_at", None)
+    return results
 
 
 def make_session_token() -> str:
@@ -125,7 +152,50 @@ def page(title: str, body: str, admin: bool = False) -> str:
     </style></head><body><div class="wrap">
     <div class="nav"><a href="/">Search</a>{nav_admin}<a href="/health">Health</a></div>
     {body}
-    </div></body></html>
+    </div>
+    <script>
+    function initSortable() {{
+      document.querySelectorAll('table[class*="sortable"], .sortable-table').forEach(function(tbl) {{
+        tbl.querySelectorAll('thead th[data-sort]').forEach(function(th, colIdx) {{
+          if (th.dataset.sortBound) return;
+          th.dataset.sortBound = '1';
+          th.style.cursor = 'pointer';
+          th.title = 'Klik untuk sort';
+          if (!th.querySelector('.sort-icon')) {{
+            var icon = document.createElement('span');
+            icon.className = 'sort-icon';
+            icon.textContent = ' ⇅';
+            icon.style.fontSize = '10px';
+            icon.style.opacity = '0.5';
+            th.appendChild(icon);
+          }}
+          th.addEventListener('click', function() {{
+            var asc = th.dataset.sortDir !== 'asc';
+            th.dataset.sortDir = asc ? 'asc' : 'desc';
+            tbl.querySelectorAll('thead th .sort-icon').forEach(function(ic) {{
+              ic.textContent = ' ⇅'; ic.style.opacity = '0.5';
+            }});
+            th.querySelector('.sort-icon').textContent = asc ? ' ▲' : ' ▼';
+            th.querySelector('.sort-icon').style.opacity = '1';
+            var tbody = tbl.querySelector('tbody');
+            var rows = Array.from(tbody.querySelectorAll('tr'));
+            rows.sort(function(a, b) {{
+              var ca = a.cells[colIdx], cb = b.cells[colIdx];
+              var va = (ca.dataset.value !== undefined ? ca.dataset.value : ca.textContent).trim();
+              var vb = (cb.dataset.value !== undefined ? cb.dataset.value : cb.textContent).trim();
+              var na = parseFloat(va), nb = parseFloat(vb);
+              var cmp = (!isNaN(na) && !isNaN(nb)) ? na - nb : va.localeCompare(vb, 'id');
+              return asc ? cmp : -cmp;
+            }});
+            rows.forEach(function(r) {{ tbody.appendChild(r); }});
+          }});
+        }});
+      }});
+    }}
+    document.addEventListener('DOMContentLoaded', initSortable);
+    document.addEventListener('htmx:afterSwap', initSortable);
+    </script>
+    </body></html>
     """
 
 
@@ -133,6 +203,14 @@ def page(title: str, body: str, admin: bool = False) -> str:
 def startup():
     with get_conn() as conn:
         init_schema(conn)
+    # Register Phase 3 admin v2 routes
+    try:
+        from admin_v2 import register_routes
+        from embeddings import embed_single as _embed_single
+        register_routes(app, get_conn, require_admin_cookie, search_hybrid, _embed_single)
+    except Exception as e:
+        import traceback
+        print(f"[admin_v2] register failed: {e}\n{traceback.format_exc()}")
 
 
 @app.get("/health", response_class=PlainTextResponse)
@@ -151,12 +229,25 @@ def render_results(results_by_query: Dict[str, List[dict]]) -> str:
         if not rows:
             chunks.append("<p class='warn'>Tidak ada hasil.</p>")
             continue
-        chunks.append("<div style='overflow:auto'><table><thead><tr><th>Score</th><th>Tanggal</th><th>Nama</th><th>Merek</th><th>Spec</th><th>Satuan</th><th>Harga</th><th>Supplier</th><th>Kategori</th><th>Keterangan</th></tr></thead><tbody>")
+        chunks.append("<div style='overflow:auto'><table class='sortable-table'><thead><tr><th data-sort='score'>Score</th><th data-sort='tanggal'>Tanggal</th><th data-sort='nama'>Nama</th><th data-sort='merek'>Merek</th><th data-sort='spec'>Spec</th><th data-sort='satuan'>Satuan</th><th data-sort='harga'>Harga</th><th data-sort='supplier'>Supplier</th><th data-sort='kategori'>Kategori</th><th data-sort='keterangan'>Keterangan</th></tr></thead><tbody>")
         for r in rows:
             score = r.get("match_score")
             score_txt = f"{float(score):.2f}" if score is not None else ""
+            score_val = f"{float(score):.4f}" if score is not None else "0"
+            harga_val = str(r.get('harga') or 0)
             chunks.append(
-                f"<tr><td>{score_txt}</td><td>{html_escape(r.get('effective_date'))}</td><td>{html_escape(r.get('nama'))}</td><td>{html_escape(r.get('merek'))}</td><td>{html_escape(r.get('spesifikasi'))}</td><td>{html_escape(r.get('satuan'))}</td><td>{fmt_rupiah(r.get('harga'))}</td><td>{html_escape(r.get('supplier'))}</td><td>{html_escape(r.get('category'))}/{html_escape(r.get('subcategory'))}</td><td>{html_escape(r.get('keterangan'))}</td></tr>"
+                f"<tr>"
+                f"<td data-value='{score_val}'>{score_txt}</td>"
+                f"<td>{html_escape(r.get('effective_date'))}</td>"
+                f"<td>{html_escape(r.get('nama'))}</td>"
+                f"<td>{html_escape(r.get('merek'))}</td>"
+                f"<td>{html_escape(r.get('spesifikasi'))}</td>"
+                f"<td>{html_escape(r.get('satuan'))}</td>"
+                f"<td data-value='{harga_val}'>{fmt_rupiah(r.get('harga'))}</td>"
+                f"<td>{html_escape(r.get('supplier'))}</td>"
+                f"<td>{html_escape(r.get('category'))}/{html_escape(r.get('subcategory'))}</td>"
+                f"<td>{html_escape(r.get('keterangan'))}</td>"
+                f"</tr>"
             )
         chunks.append("</tbody></table></div>")
     return "".join(chunks)
@@ -187,7 +278,7 @@ def search(queries: str = Form(...), limit: int = Form(10), pricedb_admin: Optio
     results = {}
     with get_conn() as conn:
         for q in lines:
-            results[q] = search_prices(conn, q, max(1, min(limit, 50)))
+            results[q] = smart_search(conn, q, max(1, min(limit, 50)))
     body = f"""
     <div class="card"><h1>Hasil Search</h1>
     <form action="/export-search.csv" method="post" style="display:inline-block"><input type="hidden" name="queries" value="{html_escape(queries)}"><input type="hidden" name="limit" value="{limit}"><button>Export CSV</button></form>
@@ -198,11 +289,15 @@ def search(queries: str = Form(...), limit: int = Form(10), pricedb_admin: Optio
 
 
 @app.get("/api/search")
-def api_search(q: str, limit: int = 5):
+def api_search(q: str, limit: int = 5, mode: str = "hybrid",
+               lokasi: str = None, sumber: str = None, category: str = None):
     safe_limit = max(1, min(limit, 10))
     with get_conn() as conn:
-        rows = search_prices(conn, q, safe_limit)
-    return {"query": q, "limit": safe_limit, "results": jsonable_encoder(rows)}
+        rows = smart_search(conn, q, safe_limit, mode=mode,
+                            lokasi=lokasi or None, sumber=sumber or None, category=category or None)
+    return {"query": q, "limit": safe_limit,
+            "filters": {"lokasi": lokasi, "sumber": sumber, "category": category},
+            "results": jsonable_encoder(rows)}
 
 
 @app.post("/api/batch-search")
@@ -215,7 +310,7 @@ def api_batch_search(payload: dict):
     results = {}
     with get_conn() as conn:
         for q in queries:
-            results[q] = jsonable_encoder(search_prices(conn, q, safe_limit))
+            results[q] = jsonable_encoder(smart_search(conn, q, safe_limit))
     return {"limit": safe_limit, "results": results}
 
 
@@ -224,7 +319,7 @@ def _collect_search_rows(queries: str, limit: int):
     rows = []
     with get_conn() as conn:
         for q in [l.strip() for l in queries.splitlines() if l.strip()]:
-            for r in search_prices(conn, q, max(1, min(limit, 50))):
+            for r in smart_search(conn, q, max(1, min(limit, 50))):
                 rows.append([
                     q, r.get("match_score"), r.get("effective_date"), r.get("nama"), r.get("merek"),
                     r.get("spesifikasi"), r.get("satuan"), r.get("harga"), r.get("supplier"),

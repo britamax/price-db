@@ -1,0 +1,35 @@
+# Eval queries — query realistis dari tender + expected substrings yang harus muncul di top-K
+# Format: query_text | expected_substring_in_nama
+#
+# Setiap baris merepresentasikan ekspektasi: query "X" harus return row dengan nama mengandung "Y" di top-K.
+# Substring matching case-insensitive.
+
+# Variasi exact / dekat (sanity check — harus 100% hit)
+Kabel NYA 1.5 mm | NYA 1.5
+Kabel NYY 3x4 mm | NYY 3x4
+Kabel NYM 2x2.5 mm | NYM 2x2.5
+Kabel NYRGBY 4x2.5 mm | NYRGBY 4x2.5
+
+# Variasi penulisan ukuran (manusia suka beda format)
+kabel nya 1,5 mm | NYA 1.5
+NYY 3 x 4 | NYY 3x4
+nyrgby 4x2,5 | NYRGBY 4x2.5
+NYM 2 x 2.5 mm | NYM 2x2.5
+
+# Variasi singkatan / typo
+kbl nya 1.5 | NYA 1.5
+kabel nyy3x4 | NYY 3x4
+
+# Query semantik / parafrase (tantangan utama embedding)
+kabel listrik 1.5 mm | NYA 1.5
+kabel grounding tunggal 6 mm | NYA 6
+kabel 3 inti 2.5 mm | NYM 3x2.5
+kabel tanam outdoor 4x10 | NYY 4x10
+kabel berisolasi pvc fleksibel 2.5 | NYMHY
+kabel berlapis baja 4x70 | NYFGBY 4x70
+kabel armoured 4x70 | NYFGBY 4x70
+
+# Query dari deskripsi tender (campur Indonesia + spek teknis)
+kawat instalasi rumah 2.5mm | NYA 2.5
+pengkabelan panel 3x6 | NYM 3x6
+kabel power 4 fasa 4x50 | NYY 4x50
