@@ -33,6 +33,7 @@ def _nav_v2() -> str:
         '<a href="/admin/search">Search Playground</a>'
         '<a href="/admin/aliases">Aliases</a>'
         '<a href="/admin/materials">Materials</a>'
+        '<a href="/admin/suppliers">Suppliers</a>'
         '<a href="/admin/batch-match">Tender Match</a>'
         '<a href="/admin/audit">Audit Log</a>'
         '<a href="/admin/raw">Raw Rows</a>'
@@ -191,6 +192,20 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
                 <input type="number" name="limit" value="10" min="1" max="50">
               </div>
             </div>
+            <div class="grid grid-3">
+              <div>
+                <label>Filter Lokasi</label>
+                <input type="text" name="lokasi" placeholder="Surabaya, Jakarta, ...">
+              </div>
+              <div>
+                <label>Filter Sumber</label>
+                <input type="text" name="sumber" placeholder="penawaran, survei, ...">
+              </div>
+              <div>
+                <label>Filter Kategori</label>
+                <input type="text" name="category" placeholder="baja, kabel, ...">
+              </div>
+            </div>
             <details>
               <summary>⚙️ Tuning bobot (cosine / trigram / tsvector)</summary>
               <div class="grid grid-3">
@@ -215,6 +230,9 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
         w_cos: float = 0.4,
         w_tri: float = 0.6,
         w_ts: float = 0.0,
+        lokasi: str = "",
+        sumber: str = "",
+        category: str = "",
         _: bool = Depends(require_admin_cookie),
     ):
         q = (q or "").strip()
@@ -228,7 +246,8 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
 
         with get_conn() as conn:
             results = search_hybrid(conn, q, emb, max(1, min(limit, 50)),
-                                    w_cosine=w_cos, w_trigram=w_tri, w_tsvector=w_ts)
+                                    w_cosine=w_cos, w_trigram=w_tri, w_tsvector=w_ts,
+                                    lokasi=lokasi or None, sumber=sumber or None, category=category or None)
 
         if not results:
             return HTMLResponse('<div class="card warn">Tidak ada hasil.</div>')
@@ -273,6 +292,9 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
         return HTMLResponse(f"""
         <div class="card">
           <h2>Hasil ({len(results)})</h2>
+          {(''.join(['<span style="background:#1e3a5f;color:#7dd3fc;padding:2px 8px;border-radius:4px;font-size:0.85em;margin-right:4px">📍 ' + html.escape(lokasi) + '</span>' if lokasi else '',
+                      '<span style="background:#1e3a5f;color:#7dd3fc;padding:2px 8px;border-radius:4px;font-size:0.85em;margin-right:4px">📦 ' + html.escape(sumber) + '</span>' if sumber else '',
+                      '<span style="background:#1e3a5f;color:#7dd3fc;padding:2px 8px;border-radius:4px;font-size:0.85em;margin-right:4px">🏷️ ' + html.escape(category) + '</span>' if category else '']))}
           {expansion_html}
           <table>
             <thead><tr><th data-sort="number">#</th><th data-sort="string">Material</th><th data-sort="string">Satuan</th><th data-sort="number">Harga</th><th data-sort="string">Supplier · Tgl</th><th data-sort="number">Score</th><th data-sort="number">Cosine</th><th data-sort="number">Trigram</th><th data-sort="number">TS</th></tr></thead>
@@ -879,3 +901,217 @@ def register_routes(app, get_conn, require_admin_cookie, search_hybrid, embed_si
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=download_name,
         )
+
+
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 5 — Supplier Dashboard & Regional Filter
+    # ──────────────────────────────────────────────────────────────────
+
+    @app.get("/admin/suppliers", response_class=HTMLResponse)
+    def admin_suppliers(_: bool = Depends(require_admin_cookie)):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT sp.id, sp.display_name, sp.supplier_normalized,
+                           sp.kota, sp.provinsi, sp.region, sp.sumber_type,
+                           sp.total_records, sp.last_updated, sp.update_count,
+                           sp.reliability_score, sp.contact, sp.website, sp.notes
+                    FROM supplier_profile sp
+                    ORDER BY sp.reliability_score DESC NULLS LAST, sp.total_records DESC
+                """)
+                suppliers = cur.fetchall()
+
+        rows_html = ""
+        for s in suppliers:
+            score = float(s["reliability_score"] or 0)
+            score_pct = int(score * 100)
+            score_color = "#27ae60" if score >= 0.7 else "#f39c12" if score >= 0.4 else "#e74c3c"
+            last_upd = str(s["last_updated"] or "-")
+            rows_html += (
+                f'<tr><td><a href="/admin/suppliers/{s["id"]}/prices">'
+                f'<strong>{html.escape(s["display_name"] or "")}</strong></a>'
+                f'<br><small class="muted">{html.escape(s["supplier_normalized"] or "")}</small></td>'
+                f'<td>{html.escape(s["kota"] or "")} &middot; {html.escape(s["region"] or "")}</td>'
+                f'<td>{html.escape(s["sumber_type"] or "")}</td>'
+                f'<td>{s["total_records"]}</td>'
+                f'<td>{s["update_count"]} upload &middot; terakhir {last_upd}</td>'
+                f'<td><div style="background:#333;border-radius:4px;height:8px;width:80px;display:inline-block;vertical-align:middle;">'
+                f'<div style="background:{score_color};width:{score_pct}%;height:100%;border-radius:4px;"></div></div>'
+                f'<span style="margin-left:6px;color:{score_color}">{score:.2f}</span></td>'
+                f'<td><a href="/admin/suppliers/{s["id"]}/edit">Edit</a></td></tr>'
+            )
+
+        body = (
+            f'<div class="card"><h1>&#x1F3ED; Supplier Dashboard</h1>'
+            f'<p class="muted">{len(suppliers)} supplier. Reliability = frekuensi upload (10+ = 1.0)</p>'
+            f'<a href="/admin/suppliers/add" style="margin-bottom:12px;display:inline-block">&#x2795; Tambah Supplier</a></div>'
+            f'<div class="card"><table><thead><tr>'
+            f'<th>Supplier</th><th>Lokasi</th><th>Sumber</th><th>Records</th><th>Update</th><th>Reliability</th><th>Aksi</th>'
+            f'</tr></thead><tbody>{rows_html}</tbody></table></div>'
+            f'<div class="card"><h2>&#x1F4CA; Distribusi Regional</h2>'
+            f'<div id="regional-chart" hx-get="/admin/suppliers/chart" hx-trigger="load" hx-swap="innerHTML"><p>Loading...</p></div></div>'
+        )
+        return HTMLResponse(_page("Supplier Dashboard", body))
+
+    @app.get("/admin/suppliers/chart", response_class=HTMLResponse)
+    def admin_suppliers_chart(_: bool = Depends(require_admin_cookie)):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COALESCE(region, 'Tidak diketahui') as region,
+                           COUNT(*) as supplier_count,
+                           SUM(total_records) as total_records
+                    FROM supplier_profile GROUP BY region ORDER BY total_records DESC
+                """)
+                rows = cur.fetchall()
+        if not rows:
+            return HTMLResponse('<p class="muted">Belum ada data regional.</p>')
+        max_r = max((r["total_records"] or 0) for r in rows) or 1
+        bars = ""
+        for r in rows:
+            pct = int((r["total_records"] or 0) / max_r * 100)
+            bars += (
+                f'<div style="margin:6px 0;display:flex;align-items:center;gap:8px">'
+                f'<span style="width:150px;text-align:right;font-size:0.85em">{html.escape(r["region"])}</span>'
+                f'<div style="flex:1;background:#333;border-radius:4px;height:18px">'
+                f'<div style="background:#3498db;width:{pct}%;height:100%;border-radius:4px;"></div></div>'
+                f'<span style="font-size:0.85em;color:#aaa">{r["total_records"]} records, {r["supplier_count"]} supplier</span></div>'
+            )
+        return HTMLResponse(bars)
+
+    @app.get("/admin/suppliers/add", response_class=HTMLResponse)
+    def admin_supplier_add_form(_: bool = Depends(require_admin_cookie)):
+        body = """
+        <div class="card"><h1>Tambah Supplier</h1>
+          <form method="post" action="/admin/suppliers/add">
+            <div class="grid grid-2">
+              <div><label>Nama Supplier *</label><input name="display_name" required placeholder="PT. Sinar Surabaya Sakti"></div>
+              <div><label>Supplier Normalized *</label><input name="supplier_normalized" required placeholder="sinar surabaya sakti"></div>
+              <div><label>Kota</label><input name="kota" placeholder="Surabaya"></div>
+              <div><label>Provinsi</label><input name="provinsi" placeholder="Jawa Timur"></div>
+              <div><label>Region</label><input name="region" placeholder="Jawa Timur"></div>
+              <div><label>Tipe Sumber</label>
+                <select name="sumber_type">
+                  <option value="penawaran">Penawaran</option>
+                  <option value="survey">Survey</option>
+                  <option value="e-katalog">E-Katalog</option>
+                  <option value="manual">Manual</option>
+                </select></div>
+              <div><label>Contact</label><input name="contact" placeholder="0812..."></div>
+              <div><label>Website</label><input name="website" placeholder="https://..."></div>
+            </div>
+            <label>Catatan</label><textarea name="notes" rows="3"></textarea>
+            <button type="submit">Simpan</button>
+            <a href="/admin/suppliers" style="margin-left:8px">Batal</a>
+          </form>
+        </div>"""
+        return HTMLResponse(_page("Tambah Supplier", body))
+
+    @app.post("/admin/suppliers/add")
+    def admin_supplier_add(
+        display_name: str = Form(...), supplier_normalized: str = Form(...),
+        kota: str = Form(""), provinsi: str = Form(""), region: str = Form(""),
+        sumber_type: str = Form("penawaran"), contact: str = Form(""),
+        website: str = Form(""), notes: str = Form(""),
+        _: bool = Depends(require_admin_cookie),
+    ):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO supplier_profile
+                      (supplier_normalized,display_name,kota,provinsi,region,sumber_type,contact,website,notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (supplier_normalized) DO UPDATE SET
+                      display_name=EXCLUDED.display_name, kota=EXCLUDED.kota,
+                      provinsi=EXCLUDED.provinsi, region=EXCLUDED.region,
+                      sumber_type=EXCLUDED.sumber_type, contact=EXCLUDED.contact,
+                      website=EXCLUDED.website, notes=EXCLUDED.notes, updated_at=now()
+                """, (supplier_normalized.strip().lower(), display_name.strip(),
+                      kota.strip() or None, provinsi.strip() or None, region.strip() or None,
+                      sumber_type, contact.strip() or None, website.strip() or None, notes.strip() or None))
+        return RedirectResponse(url="/admin/suppliers", status_code=303)
+
+    @app.get("/admin/suppliers/{supplier_id}/edit", response_class=HTMLResponse)
+    def admin_supplier_edit_form(supplier_id: int, _: bool = Depends(require_admin_cookie)):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM supplier_profile WHERE id=%s", (supplier_id,))
+                s = cur.fetchone()
+        if not s:
+            return HTMLResponse(_page("Not Found", '<div class="card err">Tidak ditemukan.</div>'))
+        def v(k): return html.escape(str(s[k] or ""))
+        opts = "".join(
+            f'<option value="{t}" {"selected" if s["sumber_type"]==t else ""}>{t}</option>'
+            for t in ["penawaran","survey","e-katalog","manual"]
+        )
+        body = (
+            f'<div class="card"><h1>Edit: {v("display_name")}</h1>'
+            f'<p class="muted">Reliability: {float(s["reliability_score"] or 0):.2f} &middot; {s["update_count"]} upload &middot; {s["total_records"]} records</p>'
+            f'<form method="post" action="/admin/suppliers/{supplier_id}/edit"><div class="grid grid-2">'
+            f'<div><label>Nama</label><input name="display_name" value="{v("display_name")}" required></div>'
+            f'<div><label>Normalized</label><input name="supplier_normalized" value="{v("supplier_normalized")}" required></div>'
+            f'<div><label>Kota</label><input name="kota" value="{v("kota")}"></div>'
+            f'<div><label>Provinsi</label><input name="provinsi" value="{v("provinsi")}"></div>'
+            f'<div><label>Region</label><input name="region" value="{v("region")}"></div>'
+            f'<div><label>Tipe Sumber</label><select name="sumber_type">{opts}</select></div>'
+            f'<div><label>Contact</label><input name="contact" value="{v("contact")}"></div>'
+            f'<div><label>Website</label><input name="website" value="{v("website")}"></div>'
+            f'</div><label>Catatan</label><textarea name="notes" rows="3">{v("notes")}</textarea>'
+            f'<button type="submit">Simpan</button><a href="/admin/suppliers" style="margin-left:8px">Batal</a></form></div>'
+        )
+        return HTMLResponse(_page(f"Edit Supplier #{supplier_id}", body))
+
+    @app.post("/admin/suppliers/{supplier_id}/edit")
+    def admin_supplier_edit(
+        supplier_id: int,
+        display_name: str = Form(...), supplier_normalized: str = Form(...),
+        kota: str = Form(""), provinsi: str = Form(""), region: str = Form(""),
+        sumber_type: str = Form("penawaran"), contact: str = Form(""),
+        website: str = Form(""), notes: str = Form(""),
+        _: bool = Depends(require_admin_cookie),
+    ):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE supplier_profile SET
+                      display_name=%s, supplier_normalized=%s, kota=%s, provinsi=%s,
+                      region=%s, sumber_type=%s, contact=%s, website=%s, notes=%s, updated_at=now()
+                    WHERE id=%s
+                """, (display_name.strip(), supplier_normalized.strip().lower(),
+                      kota.strip() or None, provinsi.strip() or None, region.strip() or None,
+                      sumber_type, contact.strip() or None, website.strip() or None,
+                      notes.strip() or None, supplier_id))
+        return RedirectResponse(url="/admin/suppliers", status_code=303)
+
+    @app.get("/admin/suppliers/{supplier_id}/prices", response_class=HTMLResponse)
+    def admin_supplier_prices(supplier_id: int, _: bool = Depends(require_admin_cookie)):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM supplier_profile WHERE id=%s", (supplier_id,))
+                s = cur.fetchone()
+                if not s:
+                    return HTMLResponse(_page("Not Found", '<div class="card err">Tidak ditemukan.</div>'))
+                cur.execute("""
+                    SELECT nama, satuan, harga, effective_date, category, canonical_unit, price_per_canonical_unit
+                    FROM price_records WHERE supplier_normalized=%s
+                    ORDER BY effective_date DESC, nama LIMIT 500
+                """, (s["supplier_normalized"],))
+                prices = cur.fetchall()
+        rows_html = "".join(
+            f'<tr><td>{html.escape(p["nama"] or "")}</td>'
+            f'<td>{html.escape(p["satuan"] or "")}</td>'
+            f'<td>Rp {float(p["harga"] or 0):,.0f}</td>'
+            f'<td>{p["effective_date"]}</td>'
+            f'<td>{html.escape(p["category"] or "")}</td></tr>'
+            for p in prices
+        )
+        body = (
+            f'<div class="card"><h1>{html.escape(s["display_name"])} &mdash; Daftar Harga</h1>'
+            f'<p class="muted">{s["total_records"]} records &middot; Terakhir: {s["last_updated"]}'
+            f' &middot; Reliability: {float(s["reliability_score"] or 0):.2f}</p>'
+            f'<a href="/admin/suppliers">Kembali ke Supplier List</a></div>'
+            f'<div class="card"><table><thead><tr>'
+            f'<th>Nama</th><th>Satuan</th><th>Harga</th><th>Tanggal</th><th>Kategori</th>'
+            f'</tr></thead><tbody>{rows_html}</tbody></table></div>'
+        )
+        return HTMLResponse(_page(f"Harga {s['display_name']}", body))

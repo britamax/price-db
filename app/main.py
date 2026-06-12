@@ -44,14 +44,16 @@ def get_conn():
     return connect_from_env(ENV)
 
 
-def smart_search(conn, query: str, limit: int = 10, mode: str = "hybrid"):
+def smart_search(conn, query: str, limit: int = 10, mode: str = "hybrid",
+                 lokasi: str = None, sumber: str = None, category: str = None):
     """Hybrid search with automatic fallback to lexical if embedding fails."""
     if mode == "lexical":
         results = search_prices(conn, query, limit)
     else:
         try:
             emb = embed_single(query)
-            results = search_hybrid(conn, query, emb, limit)
+            results = search_hybrid(conn, query, emb, limit,
+                                    lokasi=lokasi, sumber=sumber, category=category)
             # Add 'match_score' alias for backward compat with UI/export
             for r in results:
                 r["match_score"] = r.get("score")
@@ -287,11 +289,15 @@ def search(queries: str = Form(...), limit: int = Form(10), pricedb_admin: Optio
 
 
 @app.get("/api/search")
-def api_search(q: str, limit: int = 5, mode: str = "hybrid"):
+def api_search(q: str, limit: int = 5, mode: str = "hybrid",
+               lokasi: str = None, sumber: str = None, category: str = None):
     safe_limit = max(1, min(limit, 10))
     with get_conn() as conn:
-        rows = smart_search(conn, q, safe_limit, mode=mode)
-    return {"query": q, "limit": safe_limit, "results": jsonable_encoder(rows)}
+        rows = smart_search(conn, q, safe_limit, mode=mode,
+                            lokasi=lokasi or None, sumber=sumber or None, category=category or None)
+    return {"query": q, "limit": safe_limit,
+            "filters": {"lokasi": lokasi, "sumber": sumber, "category": category},
+            "results": jsonable_encoder(rows)}
 
 
 @app.post("/api/batch-search")

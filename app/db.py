@@ -355,19 +355,23 @@ def search_prices(conn, query: str, limit: int = 10) -> List[Dict[str, Any]]:
 
 
 def search_hybrid(conn, query: str, query_embedding: List[float], limit: int = 10,
-                   w_cosine: float = 0.4, w_trigram: float = 0.6, w_tsvector: float = 0.0) -> List[Dict[str, Any]]:
+                   w_cosine: float = 0.4, w_trigram: float = 0.6, w_tsvector: float = 0.0,
+                   lokasi: str = None, sumber: str = None, category: str = None) -> List[Dict[str, Any]]:
     """Hybrid search: cosine (embedding) + trigram + tsvector.
 
     Default weights tuned via grid search on eval/queries.txt (Recall@10=1.0, MRR=0.854).
-    Re-tune via `python -m eval.evaluate --sweep` when corpus shape changes significantly.
-    Query is expanded via alias map before lexical matching (variants→canonical).
+    Re-tune via  when corpus shape changes significantly.
+    Query is expanded via alias map before lexical matching (variants->canonical).
+    Supports optional filters: lokasi, sumber, category.
     """
     from aliases import expand_aliases
     query_expanded = expand_aliases(query, conn=conn)
     vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT * FROM search_hybrid(%s::vector, %s, %s, %s, %s, %s)",
-            (vec_str, query_expanded, limit, w_cosine, w_trigram, w_tsvector),
+            "SELECT * FROM search_hybrid(%s::vector, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (vec_str, query_expanded, limit, w_cosine, w_trigram, w_tsvector,
+             lokasi or None, sumber or None, category or None),
         )
         return list(cur.fetchall())
+
