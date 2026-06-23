@@ -336,21 +336,41 @@ def stats_summary(conn):
 
 
 def search_prices(conn, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Legacy trigram-only search (fallback when embeddings unavailable)."""
+    """Legacy trigram-only search (fallback when embeddings unavailable).
+    
+    Multi-word queries: matches items containing ALL query words (AND),
+    ordered by trigram similarity to the full phrase.
+    """
     q = normalize_search_text(query)
     if not q:
         return []
+    words = [w for w in q.split() if w]
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT *, similarity(search_text, %s) AS match_score
-            FROM price_records
-            WHERE search_text %% %s OR search_text ILIKE %s
-            ORDER BY effective_date DESC NULLS LAST, match_score DESC, harga ASC
-            LIMIT %s
-            """,
-            (q, q, f"%{q}%", limit),
-        )
+        if len(words) >= 2:
+            # Multi-word: trigram on full phrase OR all words present via ILIKE
+            ilike_conds = " AND ".join(["search_text ILIKE %s" for _ in words])
+            ilike_params = [f"%{w}%" for w in words]
+            cur.execute(
+                f"""
+                SELECT *, similarity(search_text, %s) AS match_score
+                FROM price_records
+                WHERE search_text %% %s OR ({ilike_conds})
+                ORDER BY effective_date DESC NULLS LAST, match_score DESC, harga ASC
+                LIMIT %s
+                """,
+                (q, q, *ilike_params, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT *, similarity(search_text, %s) AS match_score
+                FROM price_records
+                WHERE search_text %% %s OR search_text ILIKE %s
+                ORDER BY effective_date DESC NULLS LAST, match_score DESC, harga ASC
+                LIMIT %s
+                """,
+                (q, q, f"%{q}%", limit),
+            )
         return list(cur.fetchall())
 
 
